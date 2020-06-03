@@ -145,10 +145,13 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
         return;
     }
 
-    /* 32 sec is the largest value of wakeuptimer   leave 500ms slack */
-    if (durationMS > 31500) {
-        durationMS = 31500; 
+    /* 32 sec is the largest value of wakeuptimer that is supported by RTC - leave some slack */
+    if (durationMS > 30000) {
+        durationMS = 30000; 
     }
+
+    /* reduce duration by 10ms to _ensure_ we wake up before required time (avoid OS finding it has events in past to run) */
+    durationMS -= 10;
 
     /* begin tickless */
 #if MYNEWT_VAL(OS_TICKLESS_RTC)
