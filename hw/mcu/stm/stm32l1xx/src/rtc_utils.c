@@ -112,7 +112,12 @@ static struct {
     uint16_t follower_counter_start;
 } WakeUpTimer_Settings;
 
-
+static uint16_t rtc_read_ssr() {
+    /* Read SSR reg, and discard bit 15 (as reload value is only 15 bits and not using shift control ss adjust function...)
+     * no need to wait for RSF in RTC_ISR to be set before reading SSR as set BYPSHAD bit in RTC_CR using 'HAL_RTCEx_EnableBypassShadow()' in init
+     */
+    return (uint16_t)(((RtcHandle.Instance->SSR) & RTC_SSR_SS) & 0x7FFF);
+}
 
 /**
   * @brief  This function handles  WAKE UP TIMER  interrupt request.
@@ -213,7 +218,8 @@ hal_rtc_init(RTC_DateTypeDef *date, RTC_TimeTypeDef *time)
     HAL_RTC_SetTime(&RtcHandle, time, RTC_FORMAT_BIN);
 
     // Enable Direct Read of the calendar registers (not through Shadow registers)
-    HAL_RTCEx_DisableBypassShadow(&RtcHandle);
+//    HAL_RTCEx_DisableBypassShadow(&RtcHandle);
+    HAL_RTCEx_EnableBypassShadow(&RtcHandle);  /* enable bypass of shadow regs to avoid waiting on RSF */
     
 #ifdef RTC_ALARM_TEST   
     //setup alarm
@@ -318,24 +324,23 @@ hal_rtc_enable_wakeup(uint32_t time_ms)
                                      WakeUpTimer_Settings.clk_srce_sel);
     assert (rc == HAL_OK);
 
-    WakeUpTimer_Settings.follower_counter_start = 
-        ((RtcHandle.Instance->SSR) & RTC_SSR_SS);
+    WakeUpTimer_Settings.follower_counter_start = rtc_read_ssr();
 }
 
 uint32_t 
 hal_rtc_get_elapsed_wakeup_timer(void)
 {
     uint32_t time_ms;    
-    uint16_t counter_now = ((RtcHandle.Instance->SSR) & RTC_SSR_SS);
+    uint16_t counter_now = rtc_read_ssr();
     /* Note RTC_SSR is a downcounter (in fact this register is the value of the divider used to generate the RTC clock) */
-    int16_t follower_counter_elapsed = WakeUpTimer_Settings.follower_counter_start - counter_now;
+    int32_t follower_counter_elapsed = (uint32_t)WakeUpTimer_Settings.follower_counter_start - (uint32_t)counter_now;
     if (follower_counter_elapsed<0) {
         /* add max counter value ie what it reset back to */
-        follower_counter_elapsed += (uint16_t)FOLLOWER_PRESCALER_S;     
+        follower_counter_elapsed += (uint32_t)FOLLOWER_PRESCALER_S;     
         assert(follower_counter_elapsed>0);     /* this would be bad */
     }
     /* convert it into ms */
-    time_ms = (((uint32_t)follower_counter_elapsed * 1000) / DIVIDED_FOLLOWER_FREQUENCY);
+    time_ms = ((follower_counter_elapsed * 1000) / DIVIDED_FOLLOWER_FREQUENCY);
     return time_ms;
 
 }

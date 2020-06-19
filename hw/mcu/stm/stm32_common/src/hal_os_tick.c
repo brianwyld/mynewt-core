@@ -91,20 +91,19 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
 void
 os_tick_idle(os_time_t ticks)
 {
-    /* default mode will enter in WFI */
+    /* default mode will enter basic sleep mode, in WFI */
     int power_mode = HAL_BSP_POWER_WFI;
 
     OS_ASSERT_CRITICAL();
 
-    /* if < MIN_TICKS, then just leave standard SYSTICK and WFI to and wakeup in 1ms */
+    /* this means the required sleep time was < OS_IDLE_TICKLESS_MS_MIN, so just leave standard SYSTICK and WFI to and wakeup in 1ms */
     if (ticks == 0) { 
-        __DSB();
-        __WFI();
+        stm32_power_enter(power_mode, 0);
         return;
     }
 
     /* Convert to ms */
-    volatile uint32_t timeMS = os_time_ticks_to_ms32(ticks);
+    uint32_t timeMS = os_time_ticks_to_ms32(ticks);
 
 #if MYNEWT_VAL(BSP_POWER_SETUP)
     /* ask bsp for lowest power mode that is possible */
