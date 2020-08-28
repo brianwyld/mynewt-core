@@ -28,7 +28,7 @@
 
 extern void SystemClock_RestartPLL(void);
 extern void SystemClock_StopPLL(void);
-
+extern bool hal_rtc_wasWake();
 extern void hal_rtc_enable_wakeup(uint32_t time_ms);
 extern void hal_rtc_disable_wakeup(void);
 extern uint32_t hal_rtc_get_elapsed_wakeup_timer(void);
@@ -37,6 +37,14 @@ extern void hal_rtc_init(RTC_DateTypeDef *date, RTC_TimeTypeDef *time);
 #define MAX_RTC_WAKEUP_TIMER_MS (30000)
 
 void stm32_tickless_start(uint32_t timeMS);
+
+uint32_t QQQ_nsleep0;
+uint32_t QQQ_nsleepX;
+uint32_t QQQ_nstopX;
+uint32_t QQQ_total_reqX;
+uint32_t QQQ_total_delta;
+uint32_t QQQ_total_slept;
+uint32_t QQQ_wakeups;
 
 /* Put MCU  in lowest power stop state, exit only via POR or reset pin */
 void 
@@ -127,14 +135,15 @@ stm32_tickless_start(uint32_t timeMS)
     /* Suspend SysTick Interrupt */
     NVIC_DisableIRQ(SysTick_IRQn);
     /* Stop SYSTICK */
-    HAL_SuspendTick();
-    // CLEAR_BIT(SysTick->CTRL,SysTick_CTRL_TICKINT_Msk);
+    CLEAR_BIT(SysTick->CTRL,SysTick_CTRL_TICKINT_Msk);
 }
 
 void 
 stm32_tickless_stop(uint32_t timeMS)
 {
-    
+    if (hal_rtc_wasWake()) {
+        QQQ_wakeups++;
+    }
     /* add asleep duration to tick counter */
     uint32_t asleep_ms = hal_rtc_get_elapsed_wakeup_timer();
     int asleep_ticks = os_time_ms_to_ticks32(asleep_ms);
@@ -144,12 +153,13 @@ stm32_tickless_stop(uint32_t timeMS)
     /* reenable SysTick Interrupt */
     NVIC_EnableIRQ(SysTick_IRQn);
     /* reenable SysTick */
-    HAL_ResumeTick();
-    // SET_BIT(SysTick->CTRL,SysTick_CTRL_TICKINT_Msk);
+    SET_BIT(SysTick->CTRL,SysTick_CTRL_TICKINT_Msk);
 
     /* disable RTC wakeup */
     hal_rtc_disable_wakeup();
 
+    QQQ_total_delta += (timeMS-asleep_ms);
+    QQQ_total_slept += asleep_ms;
 }
 
 void 
@@ -157,6 +167,7 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
 {
     /* if sleep time was less than MIN_TICKS, it is 0. Just do usual WFI and systick will wake us in 1ms */
     if (durationMS == 0) {
+        QQQ_nsleep0++;
         HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
         return;
     }
@@ -168,12 +179,11 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
 
     /* reduce duration by 10ms to _ensure_ we wake up before required time (avoid OS finding it has events in past to run) */
     durationMS -= 10;
-
+    QQQ_total_reqX += durationMS;
     /* begin tickless */
 #if MYNEWT_VAL(OS_TICKLESS_RTC)
     stm32_tickless_start(durationMS);
 #endif
-
     switch (power_mode) {
     case HAL_BSP_POWER_OFF:
     case HAL_BSP_POWER_DEEP_SLEEP: {
@@ -192,7 +202,8 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
         break;
     }
     case HAL_BSP_POWER_SLEEP: {
-
+        QQQ_nstopX++;
+#if 0
         /*Disables the Power Voltage Detector(PVD) */                
         HAL_PWR_DisablePVD( );
         /* Enable Ultra low power mode */
@@ -207,9 +218,13 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
         SystemClock_RestartPLL();
         /* restart PVD */
         HAL_PWR_EnablePVD();
+#endif
+        // Return from STOP fails (clock not restarting?)
+        HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
         break;
     }
     case HAL_BSP_POWER_WFI: {
+        QQQ_nsleepX++;
         HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
         /* Clock is not interuppted in SLEEP mode, no need to restart it */
         break;

@@ -23,33 +23,35 @@
 #include "stm32l1xx_hal_rtc.h"
 #include "stm32l1xx_hal_pwr.h"
 #include "stm32l1xx_ll_rcc.h"
+#include "stm32l1xx_hal_rtc_ex.h"
 
 #include "bsp.h"
 #include "limits.h"
 
-/*Follower technic is a way to calcultate the amount of time elapsed during wakeup timer        */
-/*Follower needs a resolution similar to wakeup timer resolution.                               */
-/*RTC_SSR is the subsecond downcounter used for calendar block and clocked by LSE subdivided    */
-/*by asynchronous prescaler                                                                     */
-/* Note : using the RTC_SSR in this way will break the RTC as its clocks the RTC calendar at a
- * rate different from 1Hz, as we want the SSR to roll over after as long as possible.  */
-
-/* Asynchronous prediv to get 1kHz about (close to SysTick frequency) to clock the RTC_SSR. 
- * This gives ck_apre = 1024Hz    */
-#define DIVIDED_FOLLOWER_FREQUENCY                  1024
-#define FOLLOWER_PRESCALER_A                        (LSE_VALUE / DIVIDED_FOLLOWER_FREQUENCY)
-#define PREDIV_A                                    (FOLLOWER_PRESCALER_A - 1)
+/* The "Follower" technique is a way to calcultate the amount of time elapsed during sleep waiting for the RTC wakeup timer 
+  (as this timer counter cannot be read after wakeup) by using another counter running during the sleep.
+  The Follower counter needs a resolution similar to the systick timer resolution (1kHz), so that the elapsed time
+  values read from it will be sufficiently precise.
+  This is achieved by using the RTC's SSR register. 
+  RTC_SSR is the subsecond downcounter used for calendar block and clocked by LSE subdivided    
+  by asynchronous prescaler. Note that as we keep the SSR reload value such as to give 1hz to the RTC, we 
+  also need to use the RTC seconds counter as part of the elapsed time calculation (for up to 60s of sleeping)
+ */
+/* Asynchronous prediv to get ck_apre close to 1kHz (SysTick frequency) to clock the RTC_SSR to give a 
+ * precision of around 1ms for time stamps/calculations. Nearest we can get is 1024Hz with integer dividers 
+ * This has a cost - normally the APRE runs slower (256Hz) which is more energy efficient (see STM32L1xx ref manual 20.3.1)
+ * */
+#define CK_APRE_FREQUENCY                           1024        /* desired frequency for ck_apre */
+#define RTC_PRESCALER_A                             (LSE_VALUE / CK_APRE_FREQUENCY)
+#define RTC_PREDIV_A                                (RTC_PRESCALER_A - 1)
 
 /* Synchronous prediv :                                                                         */
 /*    The ck_apre clock is used to clock the binary RTC_SSR subseconds downcounter. When it     */
-/*    reaches 0, RTC_SSR is reloaded with the content of PREDIV_S. RTC_SSR is available in      */
+/*    reaches 0, RTC_SSR is reloaded with the content of RTC_PREDIV_S. RTC_SSR is available in      */
 /*    in Cat.2, Cat.3, Cat.4, Cat.5 and Cat.6 devices only                                      */
-/* Use as large a reload value (prescaler) as possible so we can measure a time interval as long 
- * as possible. At 1.024kHz, the maximim 15 bit value is 32765, so this is about 32s before it rolls 
- * over twice which would break the calculation...
- */
-#define FOLLOWER_PRESCALER_S                        32768
-#define PREDIV_S                                    (FOLLOWER_PRESCALER_S - 1)
+#define CK_SPRE_FREQUENCY                           1                       /* desire 1hz to make rtc clock have 1s resolution */
+#define RTC_PRESCALER_S                             (CK_APRE_FREQUENCY / CK_SPRE_FREQUENCY)         // this will be 1024
+#define RTC_PREDIV_S                                (RTC_PRESCALER_S - 1)
 
 
 
@@ -76,8 +78,25 @@
 #define DIVC(X, N)                                (((X) + (N) -1) / (N))
 
 #define RTC_CLOCK_PRESCALER                         (16)
-#define RTC_FREQUENCY                               (LSE_VALUE/RTC_CLOCK_PRESCALER)
-#define MAX_RTC_PERIOD_MSEC                         (1000*(65536/RTC_FREQUENCY))
+#define RTC_WAKEUP_TIMER_FREQUENCY                  (LSE_VALUE/RTC_CLOCK_PRESCALER)
+#define MAX_RTC_WAKEUP_PERIOD_MSEC                  (1000*(65536/RTC_WAKEUP_TIMER_FREQUENCY))
+
+static RTC_DateTypeDef DEFAULT_DATE = {
+        .Year = 0,
+        .Month = RTC_MONTH_JANUARY,
+        .Date = 1,
+        .WeekDay = RTC_WEEKDAY_MONDAY,
+};
+static RTC_TimeTypeDef DEFAULT_TIME = {
+            .Hours = 0,
+            .Minutes = 0,
+            .Seconds = 0,
+            .SubSeconds = 0,
+            .TimeFormat = 0,
+            .StoreOperation = RTC_STOREOPERATION_RESET,
+            .DayLightSaving = RTC_DAYLIGHTSAVING_NONE,
+};
+
 
 /*!
  * RTC timer context 
@@ -105,57 +124,41 @@ static RTC_HandleTypeDef RtcHandle = {
     .Lock = HAL_UNLOCKED,
     .State = HAL_RTC_STATE_RESET
 };
+/*!
+ * Day of year for 1st day of each month on a normal year. Months should be enumerated as 1-12 please (values provided for 0 and 13 also)
+ */
+static const uint16_t CumulDayOfYearByMonth[] = { 0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273U, 304U, 334U, 365U };
 
-static struct {
-    uint32_t clk_srce_sel;
-    uint16_t autoreload_timer;
-    uint16_t follower_counter_start;
-} WakeUpTimer_Settings;
+/* store RTC seconds / RTC SSR counter value when start a wakeup timer to be able to calculate elapsed sleep time after */
+static uint32_t RTC_SSR_start;
+static uint32_t RTC_seconds_start;
 
-static uint16_t rtc_read_ssr() {
-    /* Read SSR reg, and discard bit 15 (as reload value is only 15 bits and not using shift control ss adjust function...)
-     * no need to wait for RSF in RTC_ISR to be set before reading SSR as set BYPSHAD bit in RTC_CR using 'HAL_RTCEx_EnableBypassShadow()' in init
-     */
-    return (uint16_t)(((RtcHandle.Instance->SSR) & RTC_SSR_SS) & 0x7FFF);
-}
+/* Internals predec */
+static void rtc_wakeup_time_start();
+static uint32_t rtc_wakeup_time_end();
+static bool _rtc_wakeup_isr_called;
 
 /**
   * @brief  This function handles  WAKE UP TIMER  interrupt request.
   * @retval None
   */
-void 
+static void 
 RTC_WKUP_IRQHandler(void)
 {
+    _rtc_wakeup_isr_called = true;
     HAL_RTCEx_WakeUpTimerIRQHandler(&RtcHandle);
 }
 
-
-#ifdef RTC_ALARM_TEST
-static RTC_AlarmTypeDef RtcAlarm;
-#endif
-
-/**
-  * @brief  This function handles  ALARM (A&B)  interrupt request.
-  * @retval None
-  */
-void 
-RTC_Alarm_IRQHandler(void)
-{
-    HAL_RTC_AlarmIRQHandler(&RtcHandle);
+/* was the return from sleep due to wakeup timer? */
+bool 
+hal_rtc_wasWake() {
+    /* Check the WTUF flag in RTC ISR reg. */
+    if (__HAL_RTC_WAKEUPTIMER_GET_FLAG(&RtcHandle, RTC_FLAG_WUTF) != RESET) {
+        return true;
+    }
+    // might have been cleared by ISR, which sets this flag
+    return _rtc_wakeup_isr_called;
 }
-
-/**
-  * @brief  Alarm A callback.
-  * @param  hrtc: pointer to a RTC_HandleTypeDef structure that contains
-  *                the configuration information for RTC.
-  * @retval None
-  */
-void 
-HAL_RTC_AlarmAEventCallback(RTC_HandleTypeDef *hrtc)
-{
-
-}
-
 
 void 
 hal_rtc_init(RTC_DateTypeDef *date, RTC_TimeTypeDef *time)
@@ -173,80 +176,40 @@ hal_rtc_init(RTC_DateTypeDef *date, RTC_TimeTypeDef *time)
     PeriphClkInit.PeriphClockSelection |= RCC_PERIPHCLK_RTC;
     PeriphClkInit.RTCClockSelection = RCC_RTCCLKSOURCE_LSE;
 
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
-    {
-        assert(0);
-    }
+    rc = HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit);
+    assert(rc == HAL_OK);
 
     RtcHandle.Instance = RTC;
     RtcHandle.Init.HourFormat = RTC_HOURFORMAT_24;
-    RtcHandle.Init.AsynchPrediv = PREDIV_A;
-    RtcHandle.Init.SynchPrediv = PREDIV_S;
+    RtcHandle.Init.AsynchPrediv = RTC_PREDIV_A;
+    RtcHandle.Init.SynchPrediv = RTC_PREDIV_S;
     RtcHandle.Init.OutPut = RTC_OUTPUT_DISABLE;
     RtcHandle.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
     RtcHandle.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
     
     rc = HAL_RTC_Init(&RtcHandle);
-    assert(rc == 0);
+    assert(rc == HAL_OK);
 
     if (date == NULL) {
-        RTC_DateTypeDef default_date = {
-            .Year = 0,
-            .Month = RTC_MONTH_JANUARY,
-            .Date = 1,
-            .WeekDay = RTC_WEEKDAY_MONDAY,
-        };
-
-        date = &default_date;
+        date = &DEFAULT_DATE;
     }
 
-    if (time==NULL) {
-        RTC_TimeTypeDef default_time = {
-            .Hours = 0,
-            .Minutes = 0,
-            .Seconds = 0,
-            .SubSeconds = 0,
-            .TimeFormat = 0,
-            .StoreOperation = RTC_STOREOPERATION_RESET,
-            .DayLightSaving = RTC_DAYLIGHTSAVING_NONE,
-        };
-        
-        time = &default_time;
+    if (time==NULL) {        
+        time = &DEFAULT_TIME;
     }
 
     HAL_RTC_SetDate(&RtcHandle, date, RTC_FORMAT_BIN);
     HAL_RTC_SetTime(&RtcHandle, time, RTC_FORMAT_BIN);
 
-    // Enable Direct Read of the calendar registers (not through Shadow registers)
-//    HAL_RTCEx_DisableBypassShadow(&RtcHandle);
-    HAL_RTCEx_EnableBypassShadow(&RtcHandle);  /* enable bypass of shadow regs to avoid waiting on RSF */
-    
-#ifdef RTC_ALARM_TEST   
-    //setup alarm
-    RtcAlarm.AlarmTime.Hours = 0;
-    RtcAlarm.AlarmTime.Minutes = 0;
-    RtcAlarm.AlarmTime.Seconds = 1;
-    RtcAlarm.AlarmTime.SubSeconds = 0;
-    RtcAlarm.AlarmTime.TimeFormat = RTC_HOURFORMAT12_AM;
-    RtcAlarm.AlarmTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
-    RtcAlarm.AlarmTime.StoreOperation = RTC_STOREOPERATION_RESET;
-    RtcAlarm.AlarmMask = RTC_ALARMMASK_SECONDS;
-    RtcAlarm.AlarmSubSecondMask = RTC_ALARMSUBSECONDMASK_ALL;
-    RtcAlarm.AlarmDateWeekDaySel = RTC_ALARMDATEWEEKDAYSEL_DATE;
-    RtcAlarm.AlarmDateWeekDay = 1;
-    RtcAlarm.Alarm = RTC_ALARM_A;
-
-    NVIC_SetPriority(RTC_Alarm_IRQn, (1 << __NVIC_PRIO_BITS) - 1);
-    NVIC_SetVector(RTC_Alarm_IRQn, (uint32_t)RTC_Alarm_IRQHandler);
-    NVIC_EnableIRQ(RTC_Alarm_IRQn);
-
-    rc = HAL_RTC_SetAlarm_IT(&RtcHandle, &RtcAlarm, FORMAT_BIN);
-#else
-
+    /* MUST enable bypass of shadow regs when reading from RTC :
+     1/ as they are not updated in STOP/STANDBY mode and it takes up to 2xRTCCLK to do so (so can read pre-sleep values and think no time has passed!!) [ref man 20.3.2]
+     2/ to avoid waiting on RSF
+     3/ avoid bug in reading shadow regs between RTC_TR and RTC_SSR (see STM32L151CC erratra) */
+    HAL_RTCEx_EnableBypassShadow(&RtcHandle);  
+ 
     HAL_RTC_DeactivateAlarm(&RtcHandle, RTC_ALARM_A);
     HAL_RTC_DeactivateAlarm(&RtcHandle, RTC_ALARM_B);
     NVIC_DisableIRQ(RTC_Alarm_IRQn);
-#endif
 
     /*Prepare WakeUp capabilities */
     HAL_RTCEx_DeactivateWakeUpTimer(&RtcHandle);
@@ -257,26 +220,20 @@ hal_rtc_init(RTC_DateTypeDef *date, RTC_TimeTypeDef *time)
     /*Enable IRQ now forever */
     NVIC_EnableIRQ(RTC_WKUP_IRQn);
     
-    /*Initialises start value of the follower*/
-    WakeUpTimer_Settings.follower_counter_start = 
-        ((RtcHandle.Instance->SSR) & RTC_SSR_SS);
-
-    assert(rc == 0);
+    /* Ensure we have values in the rtc wakeup starts*/
+    rtc_wakeup_time_start();
     
 }
-
 
 void 
 hal_rtc_enable_wakeup(uint32_t time_ms)
 {    
     int rc;
 
-    /* WARNING : works only with time_ms =< 32 s (MAX_RTC_PERIOD_MSEC)
+    /* WARNING : works only with time_ms =< 32 s (MAX_RTC_WAKEUP_PERIOD_MSEC)
                 (due to the follower which is currently 
                 unable to setup lower resolution)
        
-       TODO : improve setup of follower's resolution 
-
        NOTE : for time_ms > 32 follower could be used as is by using 
               ALARM features (assuming RTC clocking very different of 1Hz)
     */
@@ -296,53 +253,30 @@ hal_rtc_enable_wakeup(uint32_t time_ms)
      */
     
 
-    if (time_ms < (uint32_t)(MAX_RTC_PERIOD_MSEC)) {
+    if (time_ms < (uint32_t)(MAX_RTC_WAKEUP_PERIOD_MSEC)) {
         /* 0 < time_ms < 32 sec */
-        WakeUpTimer_Settings.clk_srce_sel = RTC_WAKEUPCLOCK_RTCCLK_DIV16;
-        WakeUpTimer_Settings.autoreload_timer = (uint32_t)((time_ms * RTC_FREQUENCY) / 1000);
+        /* Handles setting of wakeup counter, enabling wakeup, enabling the EXTI20 line etc */
+        rc = HAL_RTCEx_SetWakeUpTimer_IT(&RtcHandle, (uint32_t)((time_ms * RTC_WAKEUP_TIMER_FREQUENCY) / 1000), 
+                                        RTC_WAKEUPCLOCK_RTCCLK_DIV16);
+        assert (rc == HAL_OK);
     } else if (time_ms < (uint32_t)(18 * 60 * 60 * 1000)) {   
-        assert(0);      /* not supported yet */
-        /* 32 sec < time_ms < 18h */
-        WakeUpTimer_Settings.clk_srce_sel = RTC_WAKEUPCLOCK_CK_SPRE_16BITS;
-        /* load counter */
-        WakeUpTimer_Settings.autoreload_timer = (time_ms / 1000);
-        /* do little adjustement */
-        WakeUpTimer_Settings.autoreload_timer -= 1;
+        /* 32s < time_ms < 18h */
+        /* not supported even if possible with clk_srce_sel = RTC_WAKEUPCLOCK_CK_SPRE_16BITS as our ck_spre is very slow due to use of SSR as elapsed time clock
+            so its about 1 tick per 32s... */
+        assert(0);   
     } else {
-        assert(0);      /* not supported yet */
         /* 18h < time_ms < 36h */
-        /*
-         * TODO : setup wakeup with ALARM feature instead of WAKEUP     
-         */
-        WakeUpTimer_Settings.clk_srce_sel = RTC_WAKEUPCLOCK_CK_SPRE_17BITS;
-        WakeUpTimer_Settings.autoreload_timer = (time_ms / 1000);
-
+        assert(0);      /* not supported */
     }
 
-    /* Setting the Wake up time */
-    rc = HAL_RTCEx_SetWakeUpTimer_IT(&RtcHandle, (uint32_t)WakeUpTimer_Settings.autoreload_timer, 
-                                     WakeUpTimer_Settings.clk_srce_sel);
-    assert (rc == HAL_OK);
-
-    WakeUpTimer_Settings.follower_counter_start = rtc_read_ssr();
+    rtc_wakeup_time_start();
+    _rtc_wakeup_isr_called = false;     // to know if the wakeup timer expires
 }
 
 uint32_t 
 hal_rtc_get_elapsed_wakeup_timer(void)
 {
-    uint32_t time_ms;    
-    uint16_t counter_now = rtc_read_ssr();
-    /* Note RTC_SSR is a downcounter (in fact this register is the value of the divider used to generate the RTC clock) */
-    int32_t follower_counter_elapsed = (uint32_t)WakeUpTimer_Settings.follower_counter_start - (uint32_t)counter_now;
-    if (follower_counter_elapsed<0) {
-        /* add max counter value ie what it reset back to */
-        follower_counter_elapsed += (uint32_t)FOLLOWER_PRESCALER_S;     
-        assert(follower_counter_elapsed>0);     /* this would be bad */
-    }
-    /* convert it into ms */
-    time_ms = ((follower_counter_elapsed * 1000) / DIVIDED_FOLLOWER_FREQUENCY);
-    return time_ms;
-
+    return rtc_wakeup_time_end();
 }
 
 void 
@@ -355,4 +289,110 @@ hal_rtc_disable_wakeup(void)
     /* after reentring in critical region : DO NOT DISABLE IRQ !!!  */
     /* IRQ will remain enabled forever                              */
     /* NVIC_DisableIRQ(RTC_WKUP_IRQn); */
+}
+
+/* RTC access functions */
+/* get clock time as unix timestamp (ms since epoch, UTC) from RTC */
+uint64_t
+hal_rtc_getRTCTimeMS() {
+    uint64_t retMS = 0;
+    uint32_t secs = 0;
+    RTC_DateTypeDef date;
+    RTC_TimeTypeDef time;
+    HAL_RTC_GetTime(&RtcHandle, &time, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&RtcHandle, &date, RTC_FORMAT_BIN);
+    /* delta with epoch date (01/01/70 : 00:00.00:0000) -> the 2 digit Year starts from 2000...
+       Convert to secs first from date/time
+       years (with extra day per leap year after 1972)
+    */
+    secs = ((date.Year+30) * (365*24*60*60)) + (((date.Year+30-2)/4) * 24*60*60);
+    /* months (if valid) */
+    if (date.Month>0 && date.Month<13 && date.Date>0 && date.Date<32) {
+        secs += (CumulDayOfYearByMonth[date.Month] + date.Date)*(24*60*60);
+    }
+    /* hours/minutes/secs */
+    secs += (time.Hours * 60*60) + (time.Minutes*60) + time.Seconds;
+    /* to ms */
+    retMS = (uint64_t)secs * 1000;
+    /* add on sub second part converted to ms  */
+    retMS+= (((RTC_PRESCALER_S - ((RtcHandle.Instance->SSR) & RTC_SSR_SS)) * 1000) / CK_APRE_FREQUENCY);
+
+    return retMS;
+}
+
+void
+hal_rtc_getRTCTime(uint16_t* year, uint8_t* month, uint8_t* dayOfMonth, uint8_t* hour24, uint8_t* min, uint8_t* sec, uint16_t* ms) {
+    RTC_DateTypeDef date;
+    RTC_TimeTypeDef time;
+    HAL_RTC_GetTime(&RtcHandle, &time, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&RtcHandle, &date, RTC_FORMAT_BIN);
+
+    /* Read subseconds directly from the countdown ssr reg, and convert to ms since last rollover (which incremented the seconds register) */
+    *ms = (((RTC_PRESCALER_S - ((RtcHandle.Instance->SSR) & RTC_SSR_SS)) * 1000) / CK_APRE_FREQUENCY);
+    /* Note we assume RTC is correctly clocked at 1Hz */
+    *year = date.Year;
+    *month = date.Month;
+    *dayOfMonth = date.Date;
+    *hour24 = time.Hours;
+    *min = time.Minutes;
+    *sec = time.Seconds;
+}
+
+
+/* internals */
+/* get secs and ssr regs without checking or converting */
+static void 
+rtc_get_rtcregs_unsafe(uint32_t* secs, uint32_t* ssr) {
+    uint32_t  tmpreg = (uint32_t)(RtcHandle.Instance->TR & RTC_TR_RESERVED_MASK); 
+    *secs = (uint32_t)(tmpreg & (RTC_TR_ST | RTC_TR_SU));
+    /* Get subseconds structure field from the corresponding register*/
+    *ssr = (uint32_t)((RtcHandle.Instance->SSR) & RTC_SSR_SS);
+}
+
+/* safely get consistant seconds and ssr values from the RTC [see RefMan STM32L1xx 20.3.6] */
+static void 
+rtc_get_time_safe(uint32_t* secsp, uint32_t* ssrp) {
+    /* get seconds and ssr, handling case where rollover between the reads */
+    uint32_t secs;
+    uint32_t ssr;
+    os_sr_t sr;
+    while (true) {
+        // get them twice in a row, with no interruptions between please
+        OS_ENTER_CRITICAL(sr);
+        rtc_get_rtcregs_unsafe(&secs, &ssr);
+        rtc_get_rtcregs_unsafe(secsp, ssrp);
+        OS_EXIT_CRITICAL(sr);
+        // if same data both times its all ok
+        if (secs==*secsp && ssr==*ssrp) {
+            /* Convert seconds to binary from native BCD in reg. */
+            *secsp = ((((secs & 0x000000F0) >> 4) * 10) + (secs & 0x0000000F));
+            /* Note we use RTC in 'bypass shadow reg' mode so don't need to read RTC_DR to unblock SR updates [20.3.3] */
+            return;
+        }
+    }
+}
+/* RTC wakeup timer period starts */
+static void rtc_wakeup_time_start() {
+    rtc_get_time_safe(&RTC_seconds_start, &RTC_SSR_start);
+}
+
+/* RTC wakeup timer period ends : return time elapse in ms */
+static uint32_t rtc_wakeup_time_end() {
+    uint32_t time_ms; 
+    uint32_t now_secs;
+    uint32_t now_ssr;   
+    rtc_get_time_safe(&now_secs, &now_ssr);
+    /* Note RTC_SSR is a downcounter so substract previous value from latest one (in fact this register is the value of the divider used to generate the RTC clock) */
+    int32_t follower_counter_elapsed = RTC_SSR_start - now_ssr;  
+    /* may be negative if rollover, handled by use of delta of seconds register */
+    /* Add on the increment to the seconds register */
+    int32_t seconds_elapsed = now_secs - RTC_seconds_start;
+    /* deal with rollover during elapse time (only need to deal with seconds, as wakeup timer is always <32s so can't have rolled over to minutes more than once) */
+    if (seconds_elapsed<0) {
+        seconds_elapsed+=60;
+        assert(seconds_elapsed>0);
+    }
+    /* Add seconds to counter converted to ms */
+    time_ms = (uint32_t)((seconds_elapsed*1000) + ((follower_counter_elapsed * 1000) / CK_APRE_FREQUENCY));
+    return time_ms;
 }
