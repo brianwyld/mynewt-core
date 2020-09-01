@@ -62,7 +62,7 @@ hal_mcu_halt()
     /* Stop SYSTICK */
     NVIC_DisableIRQ(SysTick_IRQn);
     /* Suspend SysTick Interrupt */
-    HAL_SuspendTick();
+    CLEAR_BIT(SysTick->CTRL,SysTick_CTRL_TICKINT_Msk);
 
     while (1) {
 
@@ -71,7 +71,7 @@ hal_mcu_halt()
         /* Enable Ultra low power mode */
         HAL_PWREx_EnableUltraLowPower( );
         /* Enable the fast wake up from Ultra low power mode */
-        HAL_PWREx_DisableFastWakeUp( );
+        HAL_PWREx_EnableFastWakeUp( );
         HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN1);
         HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN2);
         /* System clock down to MSI */
@@ -191,8 +191,8 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
         HAL_PWR_DisablePVD( );
         /* Enable Ultra low power mode */
         HAL_PWREx_EnableUltraLowPower( );
-        /* Enable the fast wake up from Ultra low power mode */
-        HAL_PWREx_DisableFastWakeUp( );
+        /* Enable the fast wake up from Ultra low power mode as we don't care about Vrefint readiness */
+        HAL_PWREx_EnableFastWakeUp( );
         /* System clock down to MSI */
         SystemClock_StopPLL();
         /* Enters StandBy mode */
@@ -203,29 +203,28 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
     }
     case HAL_BSP_POWER_SLEEP: {
         QQQ_nstopX++;
-#if 0
-        /*Disables the Power Voltage Detector(PVD) */                
+        /*Disables the Power Voltage Detector(PVD) */                 
         HAL_PWR_DisablePVD( );
-        /* Enable Ultra low power mode */
+        /* Enable Ultra low power mode (Vrefint off) */
         HAL_PWREx_EnableUltraLowPower( );
-        /* Disable the fast wake up from Ultra low power mode */
-        HAL_PWREx_DisableFastWakeUp( );
+        /* Enable the fast wake up from Ultra low power mode (users of Vrefint should check the flag before enabling eg ADC or PVD) */
+        HAL_PWREx_EnableFastWakeUp( );
+#if 0
         /* System clock down to MSI */
         SystemClock_StopPLL();
-        /* Enters Stop mode not in PWR_MAINREGULATOR_ON*/
-        HAL_PWR_EnterSTOPMode(PWR_MAINREGULATOR_ON, PWR_STOPENTRY_WFI);
+        /* Enters Stop mode (with LP regulator instead of PWR_MAINREGULATOR_ON) */
+        HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
         /* STOP mode has halted the clocks and will be running on MSI - restart correctly */
         SystemClock_RestartPLL();
-        /* restart PVD */
-        HAL_PWR_EnablePVD();
+        /* Reenable PVD. Required? */
+        HAL_PWR_EnablePVD( );
 #endif
-        // Return from STOP fails (clock not restarting?)
-        HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+        HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI);
         break;
     }
     case HAL_BSP_POWER_WFI: {
         QQQ_nsleepX++;
-        HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+        HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI);
         /* Clock is not interuppted in SLEEP mode, no need to restart it */
         break;
     }
