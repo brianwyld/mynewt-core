@@ -203,13 +203,13 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
     }
     case HAL_BSP_POWER_SLEEP: {
         QQQ_nstopX++;
+#if 0
         /*Disables the Power Voltage Detector(PVD) */                 
         HAL_PWR_DisablePVD( );
         /* Enable Ultra low power mode (Vrefint off) */
         HAL_PWREx_EnableUltraLowPower( );
         /* Enable the fast wake up from Ultra low power mode (users of Vrefint should check the flag before enabling eg ADC or PVD) */
         HAL_PWREx_EnableFastWakeUp( );
-#if 0
         /* System clock down to MSI */
         SystemClock_StopPLL();
         /* Enters Stop mode (with LP regulator instead of PWR_MAINREGULATOR_ON) */
@@ -224,7 +224,7 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
     }
     case HAL_BSP_POWER_WFI: {
         QQQ_nsleepX++;
-        HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+        HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
         /* Clock is not interuppted in SLEEP mode, no need to restart it */
         break;
     }
