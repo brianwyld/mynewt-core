@@ -41,7 +41,8 @@ void stm32_tickless_start(uint32_t timeMS);
 uint32_t QQQ_nsleep0;
 uint32_t QQQ_nsleepX;
 uint32_t QQQ_nstopX;
-uint32_t QQQ_total_reqX;
+uint32_t QQQ_total_reqsleepX;
+uint32_t QQQ_total_reqstopX;
 uint32_t QQQ_total_delta;
 uint32_t QQQ_total_slept;
 uint32_t QQQ_wakeups;
@@ -179,7 +180,6 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
 
     /* reduce duration by 10ms to _ensure_ we wake up before required time (avoid OS finding it has events in past to run) */
     durationMS -= 10;
-    QQQ_total_reqX += durationMS;
     /* begin tickless */
 #if MYNEWT_VAL(OS_TICKLESS_RTC)
     stm32_tickless_start(durationMS);
@@ -203,6 +203,7 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
     }
     case HAL_BSP_POWER_SLEEP: {
         QQQ_nstopX++;
+        QQQ_total_reqstopX += durationMS;
 #if 0
         /*Disables the Power Voltage Detector(PVD) */                 
         HAL_PWR_DisablePVD( );
@@ -224,6 +225,7 @@ stm32_power_enter(int power_mode, uint32_t durationMS)
     }
     case HAL_BSP_POWER_WFI: {
         QQQ_nsleepX++;
+        QQQ_total_reqsleepX += durationMS;
         HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
         /* Clock is not interuppted in SLEEP mode, no need to restart it */
         break;
