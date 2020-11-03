@@ -62,26 +62,25 @@ hal_mcu_halt()
 
     /* Stop SYSTICK */
     NVIC_DisableIRQ(SysTick_IRQn);
-    /* Suspend SysTick Interrupt */
-    CLEAR_BIT(SysTick->CTRL,SysTick_CTRL_TICKINT_Msk);
+    /* Suspend SysTick Interrupt and disable it completely */
+//    CLEAR_BIT(SysTick->CTRL,SysTick_CTRL_TICKINT_Msk);
+    SysTick->CTRL = 0;
+
+    /*Disables the Power Voltage Detector(PVD) */                
+    HAL_PWR_DisablePVD( );
+    /* Enable Ultra low power mode */
+    HAL_PWREx_EnableUltraLowPower( );
+    /* Enable the fast wake up from Ultra low power mode */
+    HAL_PWREx_DisableFastWakeUp( );
+    HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN1);
+    HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN2);
+    /* System clock down to MSI */
+    SystemClock_StopPLL();
 
     while (1) {
-
-        /*Disables the Power Voltage Detector(PVD) */                
-        HAL_PWR_DisablePVD( );
-        /* Enable Ultra low power mode */
-        HAL_PWREx_EnableUltraLowPower( );
-        /* Enable the fast wake up from Ultra low power mode */
-        HAL_PWREx_EnableFastWakeUp( );
-        HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN1);
-        HAL_PWR_DisableWakeUpPin(PWR_WAKEUP_PIN2);
-        /* System clock down to MSI */
-        SystemClock_StopPLL();
-        /* Enters Stop mode */
-//        HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+        /* Enters STANDBY mode, which can only be exited via reset (normally) */
         HAL_PWR_EnterSTANDBYMode();
-        // Shouldn't return
-        hal_system_reset();
+        // Shouldn't return but loop to re-enter mode...
     }
 }
 
