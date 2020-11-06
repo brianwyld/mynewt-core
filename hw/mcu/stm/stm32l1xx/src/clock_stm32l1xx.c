@@ -250,6 +250,7 @@ SystemClock_Config(void)
 #endif
 }
 
+uint32_t wcnt;
 /** Reconfig system clock to use PLL after return from a low power mode. Clock must be on MSI before calling this.
  * Note that the clocking config itself should have been setup at startup by SystemClock_Config().
  */
@@ -282,8 +283,12 @@ SystemClock_RestartPLL(void)
     __HAL_RCC_HSE_CONFIG(RCC_HSE_ON);
 
     /* Wait till HSE is ready */
+    wcnt=0;
     while(__HAL_RCC_GET_FLAG(RCC_FLAG_HSERDY) == RESET)
     {
+        if (wcnt++ > 100000) {
+            assert(0);
+       }
     }
 #endif
 #if MYNEWT_VAL(STM32_CLOCK_HSI)
@@ -302,14 +307,40 @@ SystemClock_RestartPLL(void)
     __HAL_RCC_PLL_ENABLE( );
 
     /* Wait till PLL is ready */
+    wcnt = 0;
     while( __HAL_RCC_GET_FLAG(RCC_FLAG_PLLRDY) == RESET) {
+        if (wcnt++ > 100000) {
+            assert(0);
+       }
+    }
+    /* From the STM32L151 reference manual section 6.2.7:
+        Note:The SYSCLK frequency change has to follow the rule that the final frequency is less then
+        4 x initial frequency to limit the VCORE drop due to a current consumption peak when the frequency increases. It must also respect 5 μs delay between two changes.
+        For example to switch from 4.2 MHz to 32 MHz, the user can switch from 4.2 MHz to
+        16 MHz, wait 5 μs, then switch from 16 MHz to 32 MHz.
+    */
+    // SO : first select HSE as clock (16MHz), wait 5uS, then switch up to PLL @32MHz
+    __HAL_RCC_SYSCLK_CONFIG (RCC_SYSCLKSOURCE_HSE);
+    wcnt=0;
+    while(__HAL_RCC_GET_SYSCLK_SOURCE( ) != RCC_SYSCLKSOURCE_STATUS_HSE) {
+        if (wcnt++ > 100000) {
+            assert(0);
+       }
+    }
+    /* 5us... how long is that? 1.25 instruction/cycle for ARM Cortex-M3, cycle time@16MHz is 0.06uS. 5uS is 100x more, so must do 100 instructions (eg inc and compare) */
+    for(int cnt=0;cnt<100; cnt++) {
+        wcnt++;
     }
 
     /* Select PLL as system clock source */
     __HAL_RCC_SYSCLK_CONFIG (RCC_SYSCLKSOURCE_PLLCLK);
 
     /* Wait till PLL is used as system clock source */
+    wcnt=0;
     while(__HAL_RCC_GET_SYSCLK_SOURCE( ) != RCC_SYSCLKSOURCE_STATUS_PLLCLK) {
+        if (wcnt++ > 100000) {
+            assert(0);
+       }
     }
 }
 
@@ -321,13 +352,21 @@ void SystemClock_StopPLL(void) {
     __HAL_RCC_MSI_ENABLE();
 
     /* Wait till MSI is ready */
+    wcnt=0;
     while(__HAL_RCC_GET_FLAG(RCC_FLAG_MSIRDY) == RESET)  {
+        if (wcnt++ > 100000) {
+            assert(0);
+        }
     }
     /* Select MSI as system clock source */
     __HAL_RCC_SYSCLK_CONFIG (RCC_SYSCLKSOURCE_MSI);
 
     /* Wait till MSI is used as system clock source */
+    wcnt=0;
     while(__HAL_RCC_GET_SYSCLK_SOURCE( ) != RCC_SYSCLKSOURCE_STATUS_MSI) {
+        if (wcnt++ > 100000) {
+            assert(0);
+       }
     }
     /* Disable the main PLL. */
     __HAL_RCC_PLL_DISABLE();

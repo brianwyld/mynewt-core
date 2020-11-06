@@ -42,7 +42,7 @@
  * This has a cost - normally the APRE runs slower (256Hz) which is more energy efficient (see STM32L1xx ref manual 20.3.1)
  * */
 #define CK_APRE_FREQUENCY                           1024        /* desired frequency for ck_apre */
-#define RTC_PRESCALER_A                             (LSE_VALUE / CK_APRE_FREQUENCY)
+#define RTC_PRESCALER_A                             (LSE_VALUE / CK_APRE_FREQUENCY)         // Around 32 as LSE is 32kHz
 #define RTC_PREDIV_A                                (RTC_PRESCALER_A - 1)
 
 /* Synchronous prediv :                                                                         */
