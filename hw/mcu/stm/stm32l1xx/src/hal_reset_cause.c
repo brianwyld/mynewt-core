@@ -33,6 +33,10 @@ hal_reset_cause(void)
     reg = RCC->CSR;
 
     if (reg & RCC_CSR_WWDGRSTF) {
+        /* window watchdog function caused reset */
+        reason = HAL_RESET_WATCHDOG;
+    } else if (reg & RCC_CSR_IWDGRSTF) {
+        /* independant reset watchdog function caused reset */
         reason = HAL_RESET_WATCHDOG;
     } else if (reg & RCC_CSR_SFTRSTF) {
         reason = HAL_RESET_SOFT;
